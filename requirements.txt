@@ -1,0 +1,5 @@
+jupyterlab
+u8darts[torch]
+pandas
+plotly
+nbformat
