@@ -28,28 +28,6 @@ to compare the Chronos and TiDE models in the context of time series forecasting
 The dataset used is the Walmart Sales Forecasting dataset.
 
 
-TODO:
-
-ZAAI
-
-
-
-A fazer:
-
-
-
-
-RESIDUALS LIMITS: 
-Inicio = 2012-01-06
-
-Test1 = 2012-01-20
-Test2 = 2012-03-30
-Test3 = 2012-06-08
-Test4 = 2012-08-17
-
-Fim = 2012-10-05
-
-
 RELATÓRIO:
 
 O que é transfer learning
