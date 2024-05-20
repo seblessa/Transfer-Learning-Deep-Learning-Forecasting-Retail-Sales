@@ -60,7 +60,6 @@ def convert_forecast_to_pandas(
 def create_darts_list_of_timeseries(
         train: pd.DataFrame
 ) -> list:
-
     return TimeSeries.from_group_dataframe(
         df=train,
         group_cols=["Store", "Dept", "Type", "Size"],
@@ -108,7 +107,6 @@ def tide_prediction(
         dataframe: pd.DataFrame,  # historical data
         forecast_horizon: int  # time period to forecast ahead after the end of the window
 ) -> pd.DataFrame:
-
     train = dataframe[(dataframe["Date"] <= window[0])]
     test = dataframe[(dataframe["Date"] > window[0]) & (dataframe["Date"] <= window[1])]
 
@@ -139,17 +137,20 @@ def tide_prediction(
 
         # create covariates to fill with 0
         covariate = covariate.stack(
-            TimeSeries.from_dataframe(dataframe[(dataframe['Store'] == store) & (dataframe['Dept'] == dept)], time_col="Date",
-                                      value_cols=["IsHoliday", 'MarkDown1', 'MarkDown2', 'MarkDown3', 'MarkDown4', 'MarkDown5'],
+            TimeSeries.from_dataframe(dataframe[(dataframe['Store'] == store) & (dataframe['Dept'] == dept)],
+                                      time_col="Date",
+                                      value_cols=["IsHoliday", 'MarkDown1', 'MarkDown2', 'MarkDown3', 'MarkDown4',
+                                                  'MarkDown5'],
                                       freq="W-FRI", fill_missing_dates=True, fillna_value=0)
         )
 
         # create covariates to fill with interpolation
-        dyn_cov_interp = TimeSeries.from_dataframe(dataframe[(dataframe['Store'] == store) & (dataframe['Dept'] == dept)],
-                                                   time_col="Date",
-                                                   value_cols=['Temperature', 'Fuel_Price', 'CPI', 'Unemployment'],
-                                                   freq="W-FRI",
-                                                   fill_missing_dates=True)
+        dyn_cov_interp = TimeSeries.from_dataframe(
+            dataframe[(dataframe['Store'] == store) & (dataframe['Dept'] == dept)],
+            time_col="Date",
+            value_cols=['Temperature', 'Fuel_Price', 'CPI', 'Unemployment'],
+            freq="W-FRI",
+            fill_missing_dates=True)
 
         covariate = covariate.stack(MissingValuesFiller().transform(dyn_cov_interp))
 
@@ -196,10 +197,10 @@ def tide_prediction(
     return tide_forecast
 
 
-
-
-
 def evaluation_metrics(prediction: pd.Series, actuals: pd.Series) -> float:
+    prediction['Date'] = pd.to_datetime(prediction['Date'])
+    actuals['Date'] = pd.to_datetime(actuals['Date'])
+
     prediction_w_mape = pd.merge(prediction, actuals.loc[:, ["Date", "Weekly_Sales", "unique_id"]],
                                  on=["Date", "unique_id"], how="left")
     prediction_w_mape["MAPE"] = abs(prediction_w_mape["forecast"] - prediction_w_mape["Weekly_Sales"]) / \
@@ -254,6 +255,55 @@ def plot_model_comparison(dataframe: pd.DataFrame) -> None:
     plt.xticks(rotation=45)
     ax.yaxis.set_major_formatter(mtick.PercentFormatter(1.0))
     plt.show()
+
+
+def plot_multiple_model_comparison(windows: list, mapes: list) -> None:
+    num_windows = len(windows)
+    x = np.arange(num_windows)  # the label locations
+    width = 0.2  # the width of the bars
+
+    # Increase the figure size for better visibility and wider plot
+    fig, ax = plt.subplots(figsize=(12, 6))
+
+    # Preparing data for the bar groups
+    chronos_mapes = [round(mape[0]*100, 0) for mape in mapes]
+    tide_mapes = [round(mape[1]*100, 0) for mape in mapes]
+    chronos_tide_mapes = [round(mape[2]*100, 0) for mape in mapes]
+
+    # Plot each model's MAPE as a separate bar in the group
+    rects1 = ax.bar(x - width, chronos_mapes, width, label='Chronos', color='darkgreen')
+    rects2 = ax.bar(x, tide_mapes, width, label='TiDE', color="darkblue")
+    rects3 = ax.bar(x + width, chronos_tide_mapes, width, label='Chronos+TiDE', color="red")
+
+    # Add some text for labels, title, and custom x-axis tick labels, etc.
+    ax.set_ylabel('MAPE (%)')
+    ax.set_title('MAPE by model and date window')
+    ax.set_xticks(x)
+    ax.set_xticklabels([f"{w[0].date().strftime('%Y-%m-%d')} to {w[1].date().strftime('%Y-%m-%d')}" for w in windows])
+    ax.legend()
+
+    def autolabel(rects):
+        """Attach a text label above each bar in *rects*, displaying its height as a whole number percentage."""
+        for rect in rects:
+            height = rect.get_height()
+            ax.annotate(f'{int(height)}%',
+                        xy=(rect.get_x() + rect.get_width() / 2, height),
+                        xytext=(0, 3),  # 3 points vertical offset
+                        textcoords="offset points",
+                        ha='center', va='bottom')
+
+    autolabel(rects1)
+    autolabel(rects2)
+    autolabel(rects3)
+
+    # Format y-axis as percentage
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: f'{int(y)}%'))
+
+    fig.tight_layout()
+
+    plt.show()
+
+
 
 
 def plot_multiple_forecasts(

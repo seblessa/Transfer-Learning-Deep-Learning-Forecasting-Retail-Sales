@@ -51,6 +51,27 @@ Concluir a melhor possibilidade de combinação
 
 
 
+TUNING NOTES:
+
+
+
+
+Parameters found: {'input_chunk_length': 22, 'output_chunk_length': 10, 'num_encoder_layers': 1, 'num_decoder_layers': 1, 'decoder_output_dim': 1, 'hidden_size': 10, 'temporal_width_past': 2, 'temporal_width_future': 2, 'temporal_decoder_hidden': 20, 'dropout': 0.001, 'batch_size': 8, 'n_epochs': 10, 'likelihood': QuantileRegression(quantiles: Optional[List[float]] = None), 'random_state': 42, 'use_static_covariates': True, 'optimizer_kwargs': {'lr': 1e-05}, 'use_reversible_instance_norm': False}
+MAPE found: 0.18
+
+
+Parameters found: {'input_chunk_length': 22, 'output_chunk_length': 10, 'num_encoder_layers': 1, 'num_decoder_layers': 1, 'decoder_output_dim': 1, 'hidden_size': 10, 'temporal_width_past': 2, 'temporal_width_future': 2, 'temporal_decoder_hidden': 20, 'dropout': 0.001, 'batch_size': 8, 'n_epochs': 15, 'likelihood': QuantileRegression(quantiles: Optional[List[float]] = None), 'random_state': 42, 'use_static_covariates': True, 'optimizer_kwargs': {'lr': 1e-05}, 'use_reversible_instance_norm': False}
+MAPE found: 0.17
+
+
+
+
+
+
+
+
+
+
 
 
 

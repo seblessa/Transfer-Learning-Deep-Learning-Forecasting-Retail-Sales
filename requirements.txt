@@ -14,3 +14,4 @@ u8darts[all]
 dask-expr
 dask
 seaborn
+optuna
