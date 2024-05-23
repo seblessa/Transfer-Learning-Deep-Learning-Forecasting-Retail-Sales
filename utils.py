@@ -102,16 +102,7 @@ def chronos_prediction(
     return prediction
 
 
-def tide_prediction(
-        window: tuple,  # (start_date, end_date)
-        dataframe: pd.DataFrame,  # historical data
-        forecast_horizon: int  # time period to forecast ahead after the end of the window
-) -> pd.DataFrame:
-    train = dataframe[(dataframe["Date"] <= window[0])]
-    test = dataframe[(dataframe["Date"] > window[0]) & (dataframe["Date"] <= window[1])]
-
-    train_darts = create_darts_list_of_timeseries(train)
-
+def create_dynamic_covariates(train_darts: list, dataframe: pd.DataFrame, forecast_horizon: int) -> list:
     dynamic_covariates = []
     for serie in train_darts:
         # add the month and week as a covariate
@@ -156,9 +147,23 @@ def tide_prediction(
 
         dynamic_covariates.append(covariate)
 
+    return dynamic_covariates
+
+
+def tide_prediction(
+        window: tuple,  # (start_date, end_date)
+        dataframe: pd.DataFrame,  # historical data
+        forecast_horizon: int  # time period to forecast ahead after the end of the window
+) -> pd.DataFrame:
+    train = dataframe[(dataframe["Date"] <= window[0])]
+
+    train_darts = create_darts_list_of_timeseries(train)
+
     SCALER = Scaler()
     TRANSFORMER = StaticCovariatesTransformer()
     PIPELINE = Pipeline([SCALER, TRANSFORMER])
+
+    dynamic_covariates = create_dynamic_covariates(train_darts, dataframe, forecast_horizon)
 
     # scale covariates
     dynamic_covariates_transformed = SCALER.fit_transform(dynamic_covariates)
@@ -197,113 +202,82 @@ def tide_prediction(
     return tide_forecast
 
 
-def evaluation_metrics(prediction: pd.Series, actuals: pd.Series) -> float:
+def rmse_evaluation(prediction: pd.Series, actuals: pd.Series) -> float:
     prediction['Date'] = pd.to_datetime(prediction['Date'])
     actuals['Date'] = pd.to_datetime(actuals['Date'])
 
-    prediction_w_mape = pd.merge(prediction, actuals.loc[:, ["Date", "Weekly_Sales", "unique_id"]],
+    prediction_w_rmse = pd.merge(prediction, actuals.loc[:, ["Date", "Weekly_Sales", "unique_id"]],
                                  on=["Date", "unique_id"], how="left")
-    prediction_w_mape["MAPE"] = abs(prediction_w_mape["forecast"] - prediction_w_mape["Weekly_Sales"]) / \
-                                prediction_w_mape["Weekly_Sales"]
-    return round(prediction_w_mape["MAPE"].mean(), 2)
+    prediction_w_rmse["RMSE"] = (prediction_w_rmse["forecast"] - prediction_w_rmse["Weekly_Sales"]) ** 2
+    return round(prediction_w_rmse["RMSE"].mean() ** 0.5, 2)
 
 
-def plot_model_comparison(dataframe: pd.DataFrame) -> None:
-    """
-    Bar plot comparison between models
-    Args:
-        dataframe (pd.DataFrame): data with actuals and forecats for both models
-    """
+def mape_evaluation(prediction: pd.DataFrame, actuals: pd.DataFrame) -> list:
+    # Convert 'Date' columns to datetime if they aren't already
+    prediction['Date'] = pd.to_datetime(prediction['Date'])
+    actuals['Date'] = pd.to_datetime(actuals['Date'])
 
-    tide_model = dataframe.rename(
-        columns={"TiDE": "forecast"}
-    )
-    tide_model["model"] = "TiDE"
-    tide_model["MAPE"] = (
-            abs(tide_model["Weekly_Sales"] - tide_model["forecast"]) / tide_model["Weekly_Sales"]
-    )
+    # Merging prediction and actual sales data on 'Date' and 'unique_id'
+    prediction_w_mape = pd.merge(prediction, actuals[['Date', 'Weekly_Sales', 'unique_id']],
+                                 on=['Date', 'unique_id'], how='left')
 
-    chronos_tiny_model = dataframe.rename(
-        columns={"Chronos Tiny": "forecast"}
-    )
-    chronos_tiny_model["model"] = "Chronos Tiny"
-    chronos_tiny_model["MAPE"] = (
-            abs(chronos_tiny_model["Weekly_Sales"] - chronos_tiny_model["forecast"])
-            / chronos_tiny_model["Weekly_Sales"]
-    )
+    # Calculating MAPE
+    prediction_w_mape['MAPE'] = abs(prediction_w_mape['forecast'] - prediction_w_mape['Weekly_Sales']) / prediction_w_mape['Weekly_Sales']
 
-    chronos_large_model = dataframe.rename(
-        columns={"Chronos Large": "forecast"}
-    )
-    chronos_large_model["model"] = "Chronos Large"
-    chronos_large_model["MAPE"] = (
-            abs(chronos_large_model["Weekly_Sales"] - chronos_large_model["forecast"])
-            / chronos_large_model["Weekly_Sales"]
-    )
+    # Group by 'Date' and calculate the mean MAPE for each group
+    weekly_mape = prediction_w_mape.groupby('Date')['MAPE'].mean().tolist()
 
-    plt.rcParams["figure.figsize"] = (20, 5)
-    ax = sns.barplot(
-        data=pd.concat(
-            [tide_model, chronos_tiny_model, chronos_large_model]
-        ),
-        x="Date",
-        y="MAPE",
-        hue="model",
-        palette=["#dd4fe4", "#070620", "#fa7302"],
-    )
-    plt.title("Comparison between TiDE and Chronos in Walmart data")
-    plt.xticks(rotation=45)
-    ax.yaxis.set_major_formatter(mtick.PercentFormatter(1.0))
-    plt.show()
+    # Ensuring the list is rounded to two decimal places
+    weekly_mape = [round(x, 2) for x in weekly_mape]
+
+    return weekly_mape
 
 
-def plot_multiple_model_comparison(windows: list, mapes: list) -> None:
-    num_windows = len(windows)
-    x = np.arange(num_windows)  # the label locations
-    width = 0.2  # the width of the bars
+def plot_model_comparison(model_forecasts, actuals, top10_stores=None):
+    model_names = ['Tide Chronos', 'TS-Mixer Chronos', 'Chronos', 'TS-Mixer', 'Tide']
+    n_weeks = 10  # Assume there are always 10 weeks
+    n_models = len(model_forecasts)
 
-    # Increase the figure size for better visibility and wider plot
-    fig, ax = plt.subplots(figsize=(12, 6))
+    # Prepare data structure to hold MAPE values for each model and week
+    weekly_mapes = np.zeros((n_weeks, n_models))
 
-    # Preparing data for the bar groups
-    chronos_mapes = [round(mape[0]*100, 0) for mape in mapes]
-    tide_mapes = [round(mape[1]*100, 0) for mape in mapes]
-    chronos_tide_mapes = [round(mape[2]*100, 0) for mape in mapes]
+    # Loop through each model's forecasts
+    for model_idx, forecasts in enumerate(model_forecasts):
+        # Calculate the MAPE for each time window for the current model
+        for time_window_idx, model_prediction in enumerate(forecasts):
+            # If top10_stores is provided, filter both prediction and actuals DataFrames
+            if top10_stores is not None:
+                model_prediction = model_prediction[model_prediction['unique_id'].isin(top10_stores['unique_id'])]
+                actual_window = actuals[time_window_idx]
+                actual_window = actual_window[actual_window['unique_id'].isin(top10_stores['unique_id'])]
+            else:
+                actual_window = actuals[time_window_idx]
 
-    # Plot each model's MAPE as a separate bar in the group
-    rects1 = ax.bar(x - width, chronos_mapes, width, label='Chronos', color='darkgreen')
-    rects2 = ax.bar(x, tide_mapes, width, label='TiDE', color="darkblue")
-    rects3 = ax.bar(x + width, chronos_tide_mapes, width, label='Chronos+TiDE', color="red")
+            mape_values = mape_evaluation(model_prediction, actual_window)
+            # Accumulate MAPE values to calculate the mean later
+            weekly_mapes[:, model_idx] += np.array(mape_values)
 
-    # Add some text for labels, title, and custom x-axis tick labels, etc.
-    ax.set_ylabel('MAPE (%)')
-    ax.set_title('MAPE by model and date window')
-    ax.set_xticks(x)
-    ax.set_xticklabels([f"{w[0].date().strftime('%Y-%m-%d')} to {w[1].date().strftime('%Y-%m-%d')}" for w in windows])
+        # Calculate mean MAPE across all time windows for the current model
+        weekly_mapes[:, model_idx] /= len(forecasts)
+
+    # Plotting
+    fig, ax = plt.subplots(figsize=(14, 8))
+    # Create an x-axis marker for each week
+    indices = np.arange(n_weeks)
+    bar_width = 0.15
+
+    # Plot each model's MAPE on the graph
+    for i in range(n_models):
+        ax.bar(indices + i * bar_width, weekly_mapes[:, i], width=bar_width, label=model_names[i])
+
+    ax.set_xlabel('Week')
+    ax.set_ylabel('Mean MAPE')
+    ax.set_title(f"Mean MAPE by Model and Week of the {'top 10 stores' if top10_stores is not None else 'top 500 stores'}")
+    ax.set_xticks(indices + bar_width * (n_models - 1) / 2)
+    ax.set_xticklabels([f'Week {i + 1}' for i in range(n_weeks)])
     ax.legend()
 
-    def autolabel(rects):
-        """Attach a text label above each bar in *rects*, displaying its height as a whole number percentage."""
-        for rect in rects:
-            height = rect.get_height()
-            ax.annotate(f'{int(height)}%',
-                        xy=(rect.get_x() + rect.get_width() / 2, height),
-                        xytext=(0, 3),  # 3 points vertical offset
-                        textcoords="offset points",
-                        ha='center', va='bottom')
-
-    autolabel(rects1)
-    autolabel(rects2)
-    autolabel(rects3)
-
-    # Format y-axis as percentage
-    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: f'{int(y)}%'))
-
-    fig.tight_layout()
-
     plt.show()
-
-
 
 
 def plot_multiple_forecasts(
@@ -323,7 +297,7 @@ def plot_multiple_forecasts(
     """
 
     # Define a list of colors for each model
-    colors = ['tomato', 'forestgreen', 'royalblue']
+    colors = ['tomato', 'forestgreen', 'royalblue', 'purple', 'yellow']
 
     # Cut the actuals_data to 5 weeks before the prediction date
     actuals_data = actuals_data[
