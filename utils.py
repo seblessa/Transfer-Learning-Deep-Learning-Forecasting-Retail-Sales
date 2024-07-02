@@ -1,18 +1,25 @@
-from darts.dataprocessing.transformers import StaticCovariatesTransformer, MissingValuesFiller
 from darts.utils.timeseries_generation import datetime_attribute_timeseries
-from darts.utils.likelihood_models import QuantileRegression
-from darts.dataprocessing.transformers import Scaler
-from darts.dataprocessing.pipeline import Pipeline
+from darts.dataprocessing.transformers import MissingValuesFiller
+from sklearn.metrics import root_mean_squared_error
 from chronos import ChronosPipeline
-from darts.models import TiDEModel
-import matplotlib.ticker as mtick
 import matplotlib.pyplot as plt
 from darts import TimeSeries
 from typing import Tuple
-import seaborn as sns
 import pandas as pd
 import numpy as np
 import torch
+
+
+def combine_predictions(forecast: pd.DataFrame, residuals_forecast: pd.DataFrame) -> pd.DataFrame:
+    # Concatenate the two dataframes
+    combined_df = pd.concat([forecast, residuals_forecast])
+
+    # Group by 'unique_id' and TIME_COL and sum the forecast values
+    return combined_df.groupby(['unique_id', "Date"]).agg({
+        'forecast_lower': 'sum',
+        'forecast': 'sum',
+        'forecast_upper': 'sum'
+    }).reset_index()
 
 
 def chronos_forecast(
@@ -70,78 +77,69 @@ def create_darts_list_of_timeseries(
         fillna_value=0)
 
 
-def chronos_prediction(
-        window: tuple,  # (start_date, end_date)
-        dataframe: pd.DataFrame,  # historical data
-        architecture: tuple,  # (tiny or large, cpu or gpu)
-        forecast_horizon: int  # time period to forecast ahead after the end of the window
-) -> pd.DataFrame:
-    train = dataframe[(dataframe["Date"] <= window[0])]
-    test = dataframe[(dataframe["Date"] > window[0]) & (dataframe["Date"] <= window[1])]
-
-    train_darts = create_darts_list_of_timeseries(train)
-
-    # Load the Chronos pipeline
-    pipeline = ChronosPipeline.from_pretrained(
-        architecture[0],
-        device_map=architecture[1],
-        torch_dtype=torch.bfloat16)
-
-    forecast = []
-    for ts in train_darts:
-        # Forecast
-        lower, mid, upper = chronos_forecast(pipeline, ts.pd_dataframe().reset_index(), forecast_horizon)
-        forecast.append(convert_forecast_to_pandas([lower, mid, upper], test[
-            test['unique_id'] == str(int(list(ts.static_covariates_values())[0][0])) + '-' + str(
-                int(list(ts.static_covariates_values())[0][1]))]))
-    # Convert list to data frames
-    prediction = pd.concat(forecast)
-    prediction.to_csv('data/chronos_forecast_' + str(window[0].date().strftime('%Y-%m-%d')) + '|' + str(
-        window[1].date().strftime('%Y-%m-%d')) + '.csv', index=False)
-
-    return prediction
-
-
-def create_dynamic_covariates(train_darts: list, dataframe: pd.DataFrame, forecast_horizon: int) -> list:
+def create_dynamic_covariates(train_darts: list, dataframe: pd.DataFrame, forecast_horizon: int,
+                              w_pred: bool = False) -> list:
     dynamic_covariates = []
+
+    # Ensure the Date column is in datetime format in both dataframes
+    dataframe['Date'] = pd.to_datetime(dataframe['Date'])
+
     for serie in train_darts:
-        # add the month and week as a covariate
+        # Extract the unique_id from the series to filter the DataFrame
+        unique_id = serie.static_covariates['unique_id'].item()
+
+        # Filter the DataFrame for the current series based on unique_id
+        filtered_df = dataframe[dataframe['unique_id'] == unique_id]
+
+        # Generate time-related covariates
         covariate = datetime_attribute_timeseries(
             serie,
             attribute="month",
             one_hot=True,
             cyclic=False,
-            add_length=forecast_horizon,
-        )
-        covariate = covariate.stack(
+            add_length=forecast_horizon
+        ).stack(
             datetime_attribute_timeseries(
                 serie,
                 attribute="week",
                 one_hot=True,
                 cyclic=False,
-                add_length=forecast_horizon,
+                add_length=forecast_horizon
             )
         )
 
-        store = serie.static_covariates['Store'].item()
-        dept = serie.static_covariates['Dept'].item()
+        if w_pred:
+            covariate = covariate.stack(
+                TimeSeries.from_dataframe(
+                    filtered_df,
+                    time_col="Date",
+                    value_cols=["IsHoliday", 'MarkDown1', 'MarkDown2', 'MarkDown3', 'MarkDown4', 'MarkDown5',
+                                'forecast'],
+                    freq=serie.freq,
+                    fill_missing_dates=True,
+                    fillna_value=0
+                )
+            )
+        else:
+            covariate = covariate.stack(
+                TimeSeries.from_dataframe(
+                    filtered_df,
+                    time_col="Date",
+                    value_cols=["IsHoliday", 'MarkDown1', 'MarkDown2', 'MarkDown3', 'MarkDown4', 'MarkDown5'],
+                    freq=serie.freq,
+                    fill_missing_dates=True,
+                    fillna_value=0
+                )
+            )
 
-        # create covariates to fill with 0
-        covariate = covariate.stack(
-            TimeSeries.from_dataframe(dataframe[(dataframe['Store'] == store) & (dataframe['Dept'] == dept)],
-                                      time_col="Date",
-                                      value_cols=["IsHoliday", 'MarkDown1', 'MarkDown2', 'MarkDown3', 'MarkDown4',
-                                                  'MarkDown5'],
-                                      freq="W-FRI", fill_missing_dates=True, fillna_value=0)
-        )
-
-        # create covariates to fill with interpolation
+        # Add dynamic covariates that need interpolation
         dyn_cov_interp = TimeSeries.from_dataframe(
-            dataframe[(dataframe['Store'] == store) & (dataframe['Dept'] == dept)],
+            filtered_df,
             time_col="Date",
             value_cols=['Temperature', 'Fuel_Price', 'CPI', 'Unemployment'],
-            freq="W-FRI",
-            fill_missing_dates=True)
+            freq=serie.freq,
+            fill_missing_dates=True
+        )
 
         covariate = covariate.stack(MissingValuesFiller().transform(dyn_cov_interp))
 
@@ -150,66 +148,19 @@ def create_dynamic_covariates(train_darts: list, dataframe: pd.DataFrame, foreca
     return dynamic_covariates
 
 
-def tide_prediction(
-        window: tuple,  # (start_date, end_date)
-        dataframe: pd.DataFrame,  # historical data
-        forecast_horizon: int  # time period to forecast ahead after the end of the window
-) -> pd.DataFrame:
-    train = dataframe[(dataframe["Date"] <= window[0])]
-
-    train_darts = create_darts_list_of_timeseries(train)
-
-    SCALER = Scaler()
-    TRANSFORMER = StaticCovariatesTransformer()
-    PIPELINE = Pipeline([SCALER, TRANSFORMER])
-
-    dynamic_covariates = create_dynamic_covariates(train_darts, dataframe, forecast_horizon)
-
-    # scale covariates
-    dynamic_covariates_transformed = SCALER.fit_transform(dynamic_covariates)
-
-    # scale data and transform static covariates
-    data_transformed = PIPELINE.fit_transform(train_darts)
-
-    TiDE_params = {
-        "input_chunk_length": len(train["Date"].unique()) - forecast_horizon,  # number of weeks to lookback
-        "output_chunk_length": forecast_horizon,  # number of weeks to forecast
-        "num_encoder_layers": 2,
-        "num_decoder_layers": 2,
-        "decoder_output_dim": 1,
-        "hidden_size": 15,
-        "temporal_width_past": 4,
-        "temporal_width_future": 4,
-        "temporal_decoder_hidden": 26,
-        "dropout": 0.1,
-        "batch_size": 16,
-        "n_epochs": 50,
-        "likelihood": QuantileRegression(quantiles=[0.25, 0.5, 0.75]),
-        "random_state": 42,
-        "use_static_covariates": True,
-        "optimizer_kwargs": {"lr": 1e-3},
-        "use_reversible_instance_norm": False,
-    }
-
-    model = TiDEModel(**TiDE_params)
-    model.fit(data_transformed, future_covariates=dynamic_covariates_transformed, verbose=False)
-    pred = PIPELINE.inverse_transform(
-        model.predict(n=forecast_horizon, series=data_transformed, future_covariates=dynamic_covariates_transformed,
-                      num_samples=50))
-    tide_forecast = transform_predictions_to_pandas(pred, "Weekly_Sales", train_darts, [0.25, 0.5, 0.75])
-    tide_forecast.to_csv('data/tide_forecast.csv' + str(window[0].date().strftime('%Y-%m-%d')) + '|' + str(
-        window[1].date().strftime('%Y-%m-%d')) + '.csv', index=False)
-    return tide_forecast
-
-
-def rmse_evaluation(prediction: pd.Series, actuals: pd.Series) -> float:
+def rmse_evaluation(prediction: pd.DataFrame, actuals: pd.DataFrame) -> float:
+    # Ensure input dataframes have the correct datetime format for 'Date'
     prediction['Date'] = pd.to_datetime(prediction['Date'])
     actuals['Date'] = pd.to_datetime(actuals['Date'])
 
-    prediction_w_rmse = pd.merge(prediction, actuals.loc[:, ["Date", "Weekly_Sales", "unique_id"]],
-                                 on=["Date", "unique_id"], how="left")
-    prediction_w_rmse["RMSE"] = (prediction_w_rmse["forecast"] - prediction_w_rmse["Weekly_Sales"]) ** 2
-    return round(prediction_w_rmse["RMSE"].mean() ** 0.5, 2)
+    # Merge predictions with actuals on 'Date' and 'unique_id'
+    prediction_w_rmse = pd.merge(prediction, actuals[['Date', 'Weekly_Sales', 'unique_id']],
+                                 on=['Date', 'unique_id'], how='left')
+
+    # Calculate squared error # TODO: calculate rmse based on scaled values
+    rmse = root_mean_squared_error(prediction_w_rmse['Weekly_Sales'], prediction_w_rmse['forecast'])
+
+    return round(rmse, 2)
 
 
 def mape_evaluation(prediction: pd.DataFrame, actuals: pd.DataFrame) -> list:
@@ -222,7 +173,8 @@ def mape_evaluation(prediction: pd.DataFrame, actuals: pd.DataFrame) -> list:
                                  on=['Date', 'unique_id'], how='left')
 
     # Calculating MAPE
-    prediction_w_mape['MAPE'] = abs(prediction_w_mape['forecast'] - prediction_w_mape['Weekly_Sales']) / prediction_w_mape['Weekly_Sales']
+    prediction_w_mape['MAPE'] = abs(prediction_w_mape['forecast'] - prediction_w_mape['Weekly_Sales']) / \
+                                prediction_w_mape['Weekly_Sales']
 
     # Group by 'Date' and calculate the mean MAPE for each group
     weekly_mape = prediction_w_mape.groupby('Date')['MAPE'].mean().tolist()
@@ -234,7 +186,10 @@ def mape_evaluation(prediction: pd.DataFrame, actuals: pd.DataFrame) -> list:
 
 
 def plot_model_comparison(model_forecasts, actuals, top10_stores=None):
-    model_names = ['Tide Chronos', 'TS-Mixer Chronos', 'Chronos', 'TS-Mixer', 'Tide']
+    model_names = ['Chronos', 'TS-Mixer', 'Tide', 'TS-Mixer Chronos',
+                   'Tide Chronos', 'TSMixer with Chronos pred in dynamic covariate',
+                   'Tide with Chronos pred in dynamic covariate']
+
     n_weeks = 10  # Assume there are always 10 weeks
     n_models = len(model_forecasts)
 
@@ -264,16 +219,22 @@ def plot_model_comparison(model_forecasts, actuals, top10_stores=None):
     fig, ax = plt.subplots(figsize=(14, 8))
     # Create an x-axis marker for each week
     indices = np.arange(n_weeks)
-    bar_width = 0.15
+    bar_width = 0.1  # Make bars narrower
+
+    # Set the gap between groups
+    group_gap = 0.2  # Large gap between groups
+    # Total width of one group of bars
+    group_width = n_models * bar_width + (n_models - 1) * 0.02  # Small space between bars in the same group
 
     # Plot each model's MAPE on the graph
     for i in range(n_models):
-        ax.bar(indices + i * bar_width, weekly_mapes[:, i], width=bar_width, label=model_names[i])
+        ax.bar(indices + i * bar_width + group_gap * indices, weekly_mapes[:, i], width=bar_width, label=model_names[i])
 
     ax.set_xlabel('Week')
     ax.set_ylabel('Mean MAPE')
-    ax.set_title(f"Mean MAPE by Model and Week of the {'top 10 stores' if top10_stores is not None else 'top 500 stores'}")
-    ax.set_xticks(indices + bar_width * (n_models - 1) / 2)
+    ax.set_title(
+        f"Mean MAPE by Model and Week of the {'top 10 stores' if top10_stores is not None else 'top 500 stores'}")
+    ax.set_xticks(indices + group_width / 2 + group_gap * indices)
     ax.set_xticklabels([f'Week {i + 1}' for i in range(n_weeks)])
     ax.legend()
 
@@ -282,24 +243,31 @@ def plot_model_comparison(model_forecasts, actuals, top10_stores=None):
 
 def plot_multiple_forecasts(
         actuals_data: pd.DataFrame, forecast_data_list: list, title: str, y_label: str, x_label: str,
-        forecast_horizon: int, interval: bool = False
+        forecast_horizon: int, interval: bool = False, top3_stores: pd.DataFrame = None
 ) -> None:
     """
-    Create time series plot of actuals vs multiple forecasts
+    Create time series plot of actuals vs multiple forecasts.
     Args:
-        :param forecast_horizon:
-        :param interval: if True, plot prediction interval
-        :param actuals_data: actual data from the dataset
-        :param forecast_data_list: list of tuples (forecast dataframe, model name)
-        :param title: title for chart
-        :param x_label
-        :param y_label
+        actuals_data: DataFrame with actual sales data.
+        forecast_data_list: List of tuples (forecast DataFrame, model name).
+        title: Title for the chart.
+        y_label: Y-axis label.
+        x_label: X-axis label.
+        forecast_horizon: Number of weeks ahead for the forecast.
+        interval: If True, plot prediction interval.
+        top3_stores: Optional DataFrame of top stores by unique_id. If provided, filters data to these stores.
     """
 
-    # Define a list of colors for each model
-    colors = ['tomato', 'forestgreen', 'royalblue', 'purple', 'yellow']
+    # Filter data for top 10 stores if provided
+    if top3_stores is not None:
+        actuals_data = actuals_data[actuals_data['unique_id'].isin(top3_stores['unique_id'])]
+        forecast_data_list = [(fd[fd['unique_id'].isin(top3_stores['unique_id'])], name)
+                              for fd, name in forecast_data_list]
 
-    # Cut the actuals_data to 5 weeks before the prediction date
+    # Define a list of colors for each model
+    colors = ['tomato', 'forestgreen', 'royalblue', 'purple', 'yellow', 'orange', 'pink', 'brown', 'grey', 'cyan']
+
+    # Cut the actuals_data to include only relevant weeks
     actuals_data = actuals_data[
         actuals_data['Date'] >= actuals_data['Date'].max() - pd.DateOffset(weeks=forecast_horizon + 3)]
 
@@ -308,7 +276,7 @@ def plot_multiple_forecasts(
         actuals_data["Date"],
         actuals_data["Weekly_Sales"],
         color="black",
-        label="historical data",
+        label="Historical Data",
     )
 
     for i, (forecast_data, model_name) in enumerate(forecast_data_list):
@@ -316,7 +284,7 @@ def plot_multiple_forecasts(
             forecast_data["Date"],
             forecast_data["forecast"],
             color=colors[i],
-            label=model_name + " forecast",
+            label=model_name + " Forecast",
         )
 
         if interval:
@@ -326,7 +294,7 @@ def plot_multiple_forecasts(
                 forecast_data["forecast_upper"],
                 color=colors[i],
                 alpha=0.3,
-                label=model_name + " 80% prediction interval",
+                label=model_name + " 80% Prediction Interval",
             )
 
     plt.ylabel(y_label)
@@ -334,44 +302,6 @@ def plot_multiple_forecasts(
     plt.title(title)
     plt.legend()
     plt.grid()
-    plt.show()
-
-
-def plot_actuals_forecast(
-        actuals_data: pd.DataFrame, forecast_data: pd.DataFrame, title: str
-) -> None:
-    """
-    Create time series plot actuals vs forecast
-    Args:
-        actuals_data (pd.DataFrame): actual data
-        forecast_data (pd.DataFrame): forecast
-        title (str): title for chart
-    """
-
-    plt.figure(figsize=(20, 5))
-    plt.plot(
-        actuals_data["Date"],
-        actuals_data["Weekly_Sales"],
-        color="royalblue",
-        label="historical data",
-    )
-    plt.plot(
-        forecast_data["Date"],
-        forecast_data["forecast"],
-        color="tomato",
-        label="median forecast",
-    )
-    plt.fill_between(
-        forecast_data["Date"],
-        forecast_data["forecast_lower"],
-        forecast_data["forecast_upper"],
-        color="tomato",
-        alpha=0.3,
-        label="80% prediction interval",
-    )
-    plt.legend()
-    plt.grid()
-    plt.title(title)
     plt.show()
 
 
