@@ -1,0 +1,21 @@
+RMSE: 6911.285
+
+
+
+input_chunk_length: 4
+output_chunk_length: 10
+num_encoder_layers: 2
+num_decoder_layers: 8
+decoder_output_dim: 15
+hidden_size: 2
+temporal_width_past: 2
+temporal_width_future: 10
+temporal_decoder_hidden: 16
+dropout: 0.1
+batch_size: 8
+n_epochs: 10
+likelihood: QuantileRegression(quantiles: Optional[List[float]] = None)
+random_state: 42
+use_static_covariates: True
+optimizer_kwargs: {'lr': 1e-05}
+use_reversible_instance_norm: True

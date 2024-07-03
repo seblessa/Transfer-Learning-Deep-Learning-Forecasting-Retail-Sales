@@ -1,0 +1,19 @@
+RMSE: 6614.3225
+
+
+
+input_chunk_length: 4
+output_chunk_length: 10
+hidden_size: 2
+ff_size: 2
+num_blocks: 1
+activation: GELU
+dropout: 0.1
+normalize_before: False
+batch_size: 16
+n_epochs: 15
+likelihood: QuantileRegression(quantiles: Optional[List[float]] = None)
+random_state: 42
+use_static_covariates: True
+optimizer_kwargs: {'lr': 1e-05}
+use_reversible_instance_norm: True
